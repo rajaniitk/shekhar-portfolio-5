@@ -10,17 +10,24 @@ from pathlib import Path
 
 def check_dependencies():
     """Check if required dependencies are installed"""
-    required_packages = [
-        'flask', 'pandas', 'numpy', 'plotly', 'scikit-learn', 
-        'matplotlib', 'seaborn', 'scipy'
-    ]
+    # Package names as they appear in imports vs pip install names
+    package_mapping = {
+        'flask': 'flask',
+        'pandas': 'pandas', 
+        'numpy': 'numpy',
+        'plotly': 'plotly',
+        'sklearn': 'scikit-learn',  # sklearn is the import name for scikit-learn
+        'matplotlib': 'matplotlib',
+        'seaborn': 'seaborn',
+        'scipy': 'scipy'
+    }
     
     missing_packages = []
-    for package in required_packages:
+    for import_name, pip_name in package_mapping.items():
         try:
-            __import__(package)
+            __import__(import_name)
         except ImportError:
-            missing_packages.append(package)
+            missing_packages.append(pip_name)
     
     if missing_packages:
         print("❌ Missing required packages:")

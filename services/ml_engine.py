@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV, RandomizedSearchCV
+from sklearn.model_selection import train_test_split, cross_val_score, GridSearchCV
 from sklearn.preprocessing import StandardScaler, LabelEncoder, OneHotEncoder
 from sklearn.impute import SimpleImputer
 from sklearn.compose import ColumnTransformer
@@ -48,7 +48,6 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import logging
-import json
 
 class MLEngine:
     """Comprehensive Machine Learning Engine with 10+ algorithms"""
@@ -68,7 +67,7 @@ class MLEngine:
         }
         
         if HAS_XGB:
-            self.classification_models['xgboost'] = XGBClassifier(random_state=42, eval_metric='logloss')
+            self.classification_models['xgboost'] = XGBClassifier(random_state=42)
         # if HAS_LGBM:
         #     self.classification_models['lightgbm'] = LGBMClassifier(random_state=42)
         
@@ -89,23 +88,6 @@ class MLEngine:
             self.regression_models['xgboost'] = XGBRegressor(random_state=42)
         # if HAS_LGBM:
         #     self.regression_models['lightgbm'] = LGBMRegressor(random_state=42)
-    
-    def _make_json_serializable(self, obj):
-        """Convert numpy/pandas objects to JSON serializable formats"""
-        if isinstance(obj, np.ndarray):
-            return obj.tolist()
-        elif isinstance(obj, np.integer):
-            return int(obj)
-        elif isinstance(obj, np.floating):
-            return float(obj)
-        elif isinstance(obj, pd.Series):
-            return obj.tolist()
-        elif isinstance(obj, dict):
-            return {k: self._make_json_serializable(v) for k, v in obj.items()}
-        elif isinstance(obj, list):
-            return [self._make_json_serializable(item) for item in obj]
-        else:
-            return obj
     
     def preprocess_data(self, df, target_column, feature_columns):
         """Preprocess data for machine learning"""
@@ -137,30 +119,24 @@ class MLEngine:
                         ('imputer', SimpleImputer(strategy='constant', fill_value='missing')),
                         ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))
                     ]), categorical_features)
-                ],
-                remainder='drop'
+                ]
             )
             
-            # Determine problem type and encode target
+            # Determine problem type
             if y.dtype in ['object', 'category'] or y.nunique() <= 20:
                 problem_type = 'classification'
                 # Encode target for classification
                 if y.dtype in ['object', 'category']:
                     label_encoder = LabelEncoder()
-                    y_encoded = label_encoder.fit_transform(y.astype(str))
-                    target_encoder_classes = label_encoder.classes_.tolist()
+                    y = label_encoder.fit_transform(y.astype(str))
+                    target_encoder = label_encoder
                 else:
-                    y_encoded = y
-                    target_encoder_classes = None
+                    target_encoder = None
             else:
                 problem_type = 'regression'
-                y_encoded = y
-                target_encoder_classes = None
+                target_encoder = None
             
-            return X, y_encoded, preprocessor, {
-                'problem_type': problem_type, 
-                'target_encoder_classes': target_encoder_classes
-            }
+            return X, y, preprocessor, {'problem_type': problem_type, 'target_encoder': target_encoder}
             
         except Exception as e:
             logging.error(f"Error preprocessing data: {str(e)}")
@@ -219,9 +195,6 @@ class MLEngine:
             metrics['cv_mean'] = float(cv_scores.mean())
             metrics['cv_std'] = float(cv_scores.std())
             
-            # Make all metrics JSON serializable
-            metrics = self._make_json_serializable(metrics)
-            
             return {
                 'success': True,
                 'model': pipeline,
@@ -229,7 +202,7 @@ class MLEngine:
                 'problem_type': problem_type,
                 'feature_columns': feature_columns,
                 'target_column': target_column,
-                'target_encoder_classes': prep_info.get('target_encoder_classes')
+                'has_target_encoder': prep_info.get('target_encoder')  is not None
             }
             
         except Exception as e:
@@ -258,28 +231,12 @@ class MLEngine:
         metrics['confusion_matrix'] = cm.tolist()
         
         # Classification report
-        try:
-            report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
-            metrics['classification_report'] = self._make_json_serializable(report)
-        except:
-            metrics['classification_report'] = {}
+        metrics['classification_report'] = classification_report(y_true, y_pred, output_dict=True)
         
         return metrics
     
     def _calculate_regression_metrics(self, y_true, y_pred):
         """Calculate regression metrics"""
-        # Ensure arrays are numeric and handle any remaining issues
-        y_true = pd.to_numeric(y_true, errors='coerce')
-        y_pred = pd.to_numeric(y_pred, errors='coerce')
-        
-        # Remove NaN values
-        mask = ~(np.isnan(y_true) | np.isnan(y_pred))
-        y_true = y_true[mask]
-        y_pred = y_pred[mask]
-        
-        if len(y_true) == 0:
-            return {'error': 'No valid predictions for metric calculation'}
-        
         metrics = {
             'mse': float(mean_squared_error(y_true, y_pred)),
             'rmse': float(np.sqrt(mean_squared_error(y_true, y_pred))),
@@ -288,11 +245,7 @@ class MLEngine:
         }
         
         # Additional metrics
-        if np.all(y_true != 0):
-            mape = np.mean(np.abs((y_true - y_pred) / y_true)) * 100
-            metrics['mape'] = float(mape)
-        else:
-            metrics['mape'] = None
+        metrics['mape'] = float(np.mean(np.abs((y_true - y_pred) / y_true)) * 100) if np.all(y_true != 0) else None
         
         return metrics
     
@@ -314,59 +267,51 @@ class MLEngine:
             # Make predictions
             y_pred = model.predict(X)
             
-            # Determine problem type
+            # Determine problem type handle lable encoding
             if hasattr(model, 'predict_proba'):
                 problem_type = 'classification'
-                
-                # Handle target encoding consistency
-                if hasattr(model, 'classes_'):
-                    try:
-                        # Try to use model classes if available
-                        if y.dtype in ['object', 'category']:
-                            label_encoder = LabelEncoder()
-                            y_encoded = label_encoder.fit_transform(y.astype(str))
-                        else:
-                            y_encoded = y
+
+                # For classification ensure y and y_pred are in the same consistent type
+                # if y contains string and y_pred contains integers, we need to convert both to strings
+                if y.dtype == 'object' or y_pred.dtype != 'object':
+                    if hasattr(model, 'classes_'):
+                        try:
+                            y_pred = model.classes_[y_pred.astype(int)]
                         
-                        metrics = self._calculate_classification_metrics(y_encoded, y_pred, model, X)
-                    except Exception as e:
-                        logging.error(f"Classification evaluation error: {str(e)}")
-                        return {'error': f'Classification evaluation failed: {str(e)}'}
-                else:
-                    # Fallback to categorical codes
-                    if y.dtype in ['object', 'category']:
-                        y_codes = pd.Categorical(y).codes
+                        except:
+                            y = pd.Categorical(y).codes
                     else:
-                        y_codes = y
-                    
-                    metrics = self._calculate_classification_metrics(y_codes, y_pred, model, X)
+                        y = pd.Categorical(y).codes
+
+                elif y.dtype != 'object' and y_pred.dtype == 'object':
+                    y_pred = pd.Categorical(y_pred).codes
+
+                metrics = self._calculate_classification_metrics(y, y_pred, model, X)
                 
                 # Generate visualization data
-                viz_data = self._create_classification_visualizations(y_encoded if 'y_encoded' in locals() else y_codes, y_pred, model, X)
+                viz_data = self._create_classification_visualizations(y, y_pred, model, X)
                 
             else:
                 problem_type = 'regression'
-                
+
                 # For regression ensure y and y_pred are numeric
-                y_numeric = pd.to_numeric(y, errors='coerce')
-                y_pred_numeric = pd.to_numeric(y_pred, errors='coerce')
-                
+                y = pd.to_numeric(y, errors='coerce')
+                y_pred = pd.to_numeric(y_pred, errors='coerce')
+
+
                 # Remove any NaN values after conversion
-                valid_mask = ~(pd.isna(y_numeric) | pd.isna(y_pred_numeric))
-                y_numeric = y_numeric[valid_mask]
-                y_pred_numeric = y_pred_numeric[valid_mask]
-                
-                if len(y_numeric) == 0:
+                valid_mask = ~(y.isnull() | y_pred.isnull())
+                y = y[valid_mask]
+                y_pred = y_pred[valid_mask]
+
+
+                if len(y) == 0:
                     return {'error': 'No valid data for regression evaluation'}
-                
-                metrics = self._calculate_regression_metrics(y_numeric, y_pred_numeric)
+
+                metrics = self._calculate_regression_metrics(y, y_pred)
                 
                 # Generate visualization data
-                viz_data = self._create_regression_visualizations(y_numeric, y_pred_numeric)
-            
-            # Make results JSON serializable
-            metrics = self._make_json_serializable(metrics)
-            viz_data = self._make_json_serializable(viz_data)
+                viz_data = self._create_regression_visualizations(y, y_pred)
             
             return {
                 'metrics': metrics,
@@ -405,53 +350,50 @@ class MLEngine:
             
             # ROC Curve (for binary classification)
             if len(np.unique(y_true)) == 2 and hasattr(model, 'predict_proba'):
-                try:
-                    y_proba = model.predict_proba(X_test)[:, 1]
-                    fpr, tpr, _ = roc_curve(y_true, y_proba)
-                    auc = roc_auc_score(y_true, y_proba)
-                    
-                    fig_roc = go.Figure()
-                    fig_roc.add_trace(go.Scatter(
-                        x=fpr, y=tpr,
-                        mode='lines',
-                        name=f'ROC Curve (AUC = {auc:.3f})'
-                    ))
-                    fig_roc.add_trace(go.Scatter(
-                        x=[0, 1], y=[0, 1],
-                        mode='lines',
-                        line=dict(dash='dash'),
-                        name='Random Classifier'
-                    ))
-                    
-                    fig_roc.update_layout(
-                        title='ROC Curve',
-                        xaxis_title='False Positive Rate',
-                        yaxis_title='True Positive Rate',
-                        template=self.plotly_template
-                    )
-                    
-                    visualizations['roc_curve'] = fig_roc.to_json()
-                    
-                    # Precision-Recall Curve
-                    precision, recall, _ = precision_recall_curve(y_true, y_proba)
-                    
-                    fig_pr = go.Figure()
-                    fig_pr.add_trace(go.Scatter(
-                        x=recall, y=precision,
-                        mode='lines',
-                        name='Precision-Recall Curve'
-                    ))
-                    
-                    fig_pr.update_layout(
-                        title='Precision-Recall Curve',
-                        xaxis_title='Recall',
-                        yaxis_title='Precision',
-                        template=self.plotly_template
-                    )
-                    
-                    visualizations['precision_recall'] = fig_pr.to_json()
-                except Exception as e:
-                    logging.warning(f"Could not create ROC/PR curves: {str(e)}")
+                y_proba = model.predict_proba(X_test)[:, 1]
+                fpr, tpr, _ = roc_curve(y_true, y_proba)
+                auc = roc_auc_score(y_true, y_proba)
+                
+                fig_roc = go.Figure()
+                fig_roc.add_trace(go.Scatter(
+                    x=fpr, y=tpr,
+                    mode='lines',
+                    name=f'ROC Curve (AUC = {auc:.3f})'
+                ))
+                fig_roc.add_trace(go.Scatter(
+                    x=[0, 1], y=[0, 1],
+                    mode='lines',
+                    line=dict(dash='dash'),
+                    name='Random Classifier'
+                ))
+                
+                fig_roc.update_layout(
+                    title='ROC Curve',
+                    xaxis_title='False Positive Rate',
+                    yaxis_title='True Positive Rate',
+                    template=self.plotly_template
+                )
+                
+                visualizations['roc_curve'] = fig_roc.to_json()
+                
+                # Precision-Recall Curve
+                precision, recall, _ = precision_recall_curve(y_true, y_proba)
+                
+                fig_pr = go.Figure()
+                fig_pr.add_trace(go.Scatter(
+                    x=recall, y=precision,
+                    mode='lines',
+                    name='Precision-Recall Curve'
+                ))
+                
+                fig_pr.update_layout(
+                    title='Precision-Recall Curve',
+                    xaxis_title='Recall',
+                    yaxis_title='Precision',
+                    template=self.plotly_template
+                )
+                
+                visualizations['precision_recall'] = fig_pr.to_json()
             
         except Exception as e:
             logging.error(f"Error creating classification visualizations: {str(e)}")
@@ -553,15 +495,14 @@ class MLEngine:
             prediction = model.predict(input_df)
             
             result = {
-                'prediction': float(prediction[0]) if len(prediction) == 1 else [float(p) for p in prediction]
+                'prediction': float(prediction[0]) if len(prediction) == 1 else prediction.tolist()
             }
             
             # Add probability for classification
             if hasattr(model, 'predict_proba'):
-                proba = model.predict_proba(input_df)
-                result['probability'] = [float(p) for p in proba[0]]
-                if hasattr(model, 'classes_'):
-                    result['classes'] = [str(c) for c in model.classes_]
+                probabilities = model.predict_proba(input_df)
+                result['probabilities'] = probabilities[0].tolist()
+                result['classes'] = model.classes_.tolist() if hasattr(model, 'classes_') else None
             
             return result
             
@@ -570,9 +511,9 @@ class MLEngine:
             return {'error': str(e)}
     
     def get_feature_importance(self, model, feature_columns):
-        """Get feature importance for a trained model"""
+        """Get feature importance from trained model"""
         try:
-            # Get the actual model from pipeline
+            # Extract the actual model from pipeline
             if hasattr(model, 'named_steps'):
                 actual_model = model.named_steps.get('classifier') or model.named_steps.get('regressor')
             else:
@@ -580,51 +521,64 @@ class MLEngine:
             
             importance_data = {}
             
-            # Different methods to get feature importance
+            # Get feature importance if available
             if hasattr(actual_model, 'feature_importances_'):
-                # Tree-based models
-                feature_names = self._get_feature_names_from_pipeline(model, feature_columns)
-                importances = actual_model.feature_importances_
+                # For tree-based models
                 
-                importance_data['feature_importance'] = dict(zip(feature_names, [float(imp) for imp in importances]))
-                importance_data['method'] = 'built_in_importance'
+                # Get feature names after preprocessing
+                if hasattr(model, 'named_steps') and 'preprocessor' in model.named_steps:
+                    try:
+                        feature_names = model.named_steps['preprocessor'].get_feature_names_out()
+                        importances = actual_model.feature_importances_
+                        
+                        # Map back to original feature names (approximate)
+                        feature_importance_dict = {}
+                        for orig_feature in feature_columns:
+                            # Find all transformed features that came from this original feature
+                            matching_indices = [i for i, name in enumerate(feature_names) 
+                                              if orig_feature in str(name)]
+                            
+                            if matching_indices:
+                                # Sum importance for all transformations of this feature
+                                total_importance = sum(importances[i] for i in matching_indices)
+                                feature_importance_dict[orig_feature] = float(total_importance)
+                        
+                        importance_data['feature_importance'] = feature_importance_dict
+                        
+                    except:
+                        # Fallback to basic importance
+                        importance_data['feature_importance'] = {
+                            f'feature_{i}': float(imp) 
+                            for i, imp in enumerate(actual_model.feature_importances_[:len(feature_columns)])
+                        }
                 
             elif hasattr(actual_model, 'coef_'):
-                # Linear models
-                feature_names = self._get_feature_names_from_pipeline(model, feature_columns)
+                # For linear models
+                coefficients = actual_model.coef_
+                if coefficients.ndim > 1:
+                    coefficients = coefficients[0]  # For multiclass, take first class
                 
-                if len(actual_model.coef_.shape) == 1:
-                    # Binary classification or regression
-                    coefficients = actual_model.coef_
-                else:
-                    # Multi-class classification - use mean absolute coefficients
-                    coefficients = np.mean(np.abs(actual_model.coef_), axis=0)
-                
-                importance_data['feature_importance'] = dict(zip(feature_names, [float(coef) for coef in coefficients]))
-                importance_data['method'] = 'coefficients'
-                
-            else:
-                # Permutation importance as fallback
-                importance_data['feature_importance'] = dict(zip(feature_columns, [0.0] * len(feature_columns)))
-                importance_data['method'] = 'not_available'
-                importance_data['message'] = 'Feature importance not available for this model type'
+                importance_data['coefficients'] = {
+                    feature: float(abs(coef)) 
+                    for feature, coef in zip(feature_columns, coefficients[:len(feature_columns)])
+                }
             
             # Create visualization
-            if importance_data['feature_importance']:
+            if 'feature_importance' in importance_data:
                 sorted_features = sorted(importance_data['feature_importance'].items(), 
-                                       key=lambda x: abs(x[1]), reverse=True)[:20]
+                                       key=lambda x: x[1], reverse=True)
                 
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
-                    x=[item[1] for item in sorted_features],
-                    y=[item[0] for item in sorted_features],
+                    x=[imp for _, imp in sorted_features],
+                    y=[feat for feat, _ in sorted_features],
                     orientation='h',
                     name='Feature Importance'
                 ))
                 
                 fig.update_layout(
                     title='Feature Importance',
-                    xaxis_title='Importance Score',
+                    xaxis_title='Importance',
                     yaxis_title='Features',
                     template=self.plotly_template,
                     height=max(400, len(sorted_features) * 25)
@@ -638,35 +592,6 @@ class MLEngine:
             logging.error(f"Error getting feature importance: {str(e)}")
             return {'error': str(e)}
     
-    def _get_feature_names_from_pipeline(self, pipeline, original_features):
-        """Extract feature names from preprocessing pipeline"""
-        try:
-            if hasattr(pipeline, 'named_steps') and 'preprocessor' in pipeline.named_steps:
-                preprocessor = pipeline.named_steps['preprocessor']
-                
-                # Get feature names from ColumnTransformer
-                if hasattr(preprocessor, 'get_feature_names_out'):
-                    feature_names = preprocessor.get_feature_names_out().tolist()
-                else:
-                    # Fallback - construct names manually
-                    feature_names = []
-                    for name, transformer, columns in preprocessor.transformers_:
-                        if name == 'num':
-                            feature_names.extend(columns)
-                        elif name == 'cat':
-                            # OneHot encoder creates multiple features per categorical column
-                            for col in columns:
-                                # Approximate number of categories (this is a simplification)
-                                feature_names.extend([f"{col}_{i}" for i in range(10)])
-                
-                return feature_names[:len(preprocessor.fit_transform(pd.DataFrame(columns=original_features, data=[range(len(original_features))]).iloc[:1])[0])]
-            else:
-                return original_features
-                
-        except Exception as e:
-            logging.warning(f"Could not extract feature names: {str(e)}")
-            return original_features
-    
     def hyperparameter_tuning(self, df, target_column, feature_columns, model_type, problem_type='auto', param_grid=None):
         """Perform hyperparameter tuning"""
         try:
@@ -674,25 +599,62 @@ class MLEngine:
             X, y, preprocessor, prep_info = self.preprocess_data(df, target_column, feature_columns)
             
             if X is None:
-                return {'success': False, 'error': prep_info.get('error', 'Unknown preprocessing error')}
+                return {'error': prep_info.get('error', 'Unknown preprocessing error')}
             
-            # Determine problem type if auto
+            # Determine problem type
             if problem_type == 'auto':
                 problem_type = prep_info['problem_type']
             
             # Select model
             if problem_type == 'classification':
                 if model_type not in self.classification_models:
-                    return {'success': False, 'error': f'Unknown classification model: {model_type}'}
+                    return {'error': f'Unknown classification model: {model_type}'}
                 model = self.classification_models[model_type]
             else:
                 if model_type not in self.regression_models:
-                    return {'success': False, 'error': f'Unknown regression model: {model_type}'}
+                    return {'error': f'Unknown regression model: {model_type}'}
                 model = self.regression_models[model_type]
             
             # Default parameter grids
+            default_param_grids = {
+                'random_forest': {
+                    'classifier__n_estimators': [50, 100, 200],
+                    'classifier__max_depth': [None, 10, 20],
+                    'classifier__min_samples_split': [2, 5, 10]
+                },
+                'gradient_boosting': {
+                    'classifier__n_estimators': [50, 100, 200],
+                    'classifier__learning_rate': [0.01, 0.1, 0.2],
+                    'classifier__max_depth': [3, 5, 7]
+                },
+                'svm': {
+                    'classifier__C': [0.1, 1, 10],
+                    'classifier__kernel': ['rbf', 'linear'],
+                    'classifier__gamma': ['scale', 'auto']
+                },
+                'logistic_regression': {
+                    'classifier__C': [0.1, 1, 10],
+                    'classifier__penalty': ['l1', 'l2'],
+                    'classifier__solver': ['liblinear', 'saga']
+                }
+            }
+            
+            # Adapt for regression
+            if problem_type == 'regression':
+                for key in list(default_param_grids.keys()):
+                    grid = default_param_grids[key]
+                    new_grid = {}
+                    for param, values in grid.items():
+                        new_param = param.replace('classifier__', 'regressor__')
+                        new_grid[new_param] = values
+                    default_param_grids[key] = new_grid
+            
+            # Use provided param_grid or default
             if param_grid is None:
-                param_grid = self._get_default_param_grid(model_type, problem_type)
+                param_grid = default_param_grids.get(model_type, {})
+            
+            if not param_grid:
+                return {'error': f'No parameter grid available for {model_type}'}
             
             # Create pipeline
             pipeline = Pipeline([
@@ -700,193 +662,31 @@ class MLEngine:
                 ('classifier' if problem_type == 'classification' else 'regressor', model)
             ])
             
-            # Adjust parameter keys for pipeline
-            if param_grid:
-                pipeline_param_grid = {}
-                prefix = 'classifier__' if problem_type == 'classification' else 'regressor__'
-                for key, values in param_grid.items():
-                    pipeline_param_grid[prefix + key] = values
-            else:
-                pipeline_param_grid = {}
-            
             # Perform grid search
-            if len(pipeline_param_grid) > 0:
-                # Use RandomizedSearchCV for efficiency
-                search = RandomizedSearchCV(
-                    pipeline,
-                    pipeline_param_grid,
-                    n_iter=20,  # Limit iterations for speed
-                    cv=3,       # Reduce CV folds for speed
-                    random_state=42,
-                    n_jobs=-1,
-                    scoring='accuracy' if problem_type == 'classification' else 'r2'
-                )
-                
-                search.fit(X, y)
-                
-                # Extract results
-                results = {
-                    'success': True,
-                    'best_params': search.best_params_,
-                    'best_score': float(search.best_score_),
-                    'best_model': search.best_estimator_,
-                    'cv_results': {
-                        'mean_test_scores': [float(score) for score in search.cv_results_['mean_test_score']],
-                        'std_test_scores': [float(score) for score in search.cv_results_['std_test_score']],
-                        'params': [dict(params) for params in search.cv_results_['params']]
-                    }
+            scoring = 'accuracy' if problem_type == 'classification' else 'r2'
+            grid_search = GridSearchCV(
+                pipeline, 
+                param_grid, 
+                cv=3,  # Reduced for performance
+                scoring=scoring,
+                n_jobs=-1
+            )
+            
+            grid_search.fit(X, y)
+            
+            # Return results
+            results = {
+                'best_parameters': grid_search.best_params_,
+                'best_score': float(grid_search.best_score_),
+                'cv_results': {
+                    'mean_test_scores': grid_search.cv_results_['mean_test_score'].tolist(),
+                    'std_test_scores': grid_search.cv_results_['std_test_score'].tolist(),
+                    'parameters': [dict(params) for params in grid_search.cv_results_['params']]
                 }
-                
-                # Remove non-serializable items for response
-                response_results = results.copy()
-                response_results.pop('best_model', None)
-                response_results = self._make_json_serializable(response_results)
-                
-                return response_results
-            else:
-                return {'success': False, 'error': 'No parameters to tune'}
+            }
+            
+            return results
             
         except Exception as e:
             logging.error(f"Error in hyperparameter tuning: {str(e)}")
-            return {'success': False, 'error': str(e)}
-    
-    def _get_default_param_grid(self, model_type, problem_type):
-        """Get default parameter grids for hyperparameter tuning"""
-        param_grids = {
-            'classification': {
-                'random_forest': {
-                    'n_estimators': [50, 100, 200],
-                    'max_depth': [3, 5, 10, None],
-                    'min_samples_split': [2, 5, 10],
-                    'min_samples_leaf': [1, 2, 4]
-                },
-                'logistic_regression': {
-                    'C': [0.1, 1.0, 10.0],
-                    'solver': ['liblinear', 'lbfgs'],
-                    'max_iter': [1000]
-                },
-                'svm': {
-                    'C': [0.1, 1, 10],
-                    'kernel': ['rbf', 'linear'],
-                    'gamma': ['scale', 'auto']
-                },
-                'gradient_boosting': {
-                    'n_estimators': [50, 100, 200],
-                    'learning_rate': [0.01, 0.1, 0.2],
-                    'max_depth': [3, 5, 7]
-                }
-            },
-            'regression': {
-                'random_forest': {
-                    'n_estimators': [50, 100, 200],
-                    'max_depth': [3, 5, 10, None],
-                    'min_samples_split': [2, 5, 10],
-                    'min_samples_leaf': [1, 2, 4]
-                },
-                'ridge': {
-                    'alpha': [0.1, 1.0, 10.0, 100.0]
-                },
-                'lasso': {
-                    'alpha': [0.1, 1.0, 10.0, 100.0]
-                },
-                'gradient_boosting': {
-                    'n_estimators': [50, 100, 200],
-                    'learning_rate': [0.01, 0.1, 0.2],
-                    'max_depth': [3, 5, 7]
-                }
-            }
-        }
-        
-        return param_grids.get(problem_type, {}).get(model_type, {})
-    
-    def auto_ml(self, df, target_column, feature_columns=None, problem_type='auto', time_limit=300):
-        """Automated Machine Learning - try multiple models and return the best"""
-        try:
-            # Use all columns except target if no features specified
-            if feature_columns is None:
-                feature_columns = [col for col in df.columns if col != target_column]
-            
-            # Preprocess data
-            X, y, preprocessor, prep_info = self.preprocess_data(df, target_column, feature_columns)
-            
-            if X is None:
-                return {'success': False, 'error': prep_info.get('error', 'Unknown preprocessing error')}
-            
-            # Determine problem type if auto
-            if problem_type == 'auto':
-                problem_type = prep_info['problem_type']
-            
-            # Select models to try
-            if problem_type == 'classification':
-                models_to_try = ['random_forest', 'logistic_regression', 'gradient_boosting']
-                if HAS_XGB:
-                    models_to_try.append('xgboost')
-            else:
-                models_to_try = ['random_forest', 'linear_regression', 'ridge', 'gradient_boosting']
-                if HAS_XGB:
-                    models_to_try.append('xgboost')
-            
-            results = []
-            best_score = -np.inf if problem_type == 'regression' else 0
-            best_model_info = None
-            
-            # Try each model
-            for model_type in models_to_try:
-                try:
-                    # Train model
-                    model_result = self.train_model(
-                        df, target_column, feature_columns, 
-                        model_type, problem_type
-                    )
-                    
-                    if model_result['success']:
-                        # Get primary metric
-                        if problem_type == 'classification':
-                            score = model_result['metrics']['accuracy']
-                        else:
-                            score = model_result['metrics']['r2']
-                        
-                        model_info = {
-                            'model_type': model_type,
-                            'score': score,
-                            'metrics': model_result['metrics'],
-                            'cv_mean': model_result['metrics'].get('cv_mean', 0),
-                            'cv_std': model_result['metrics'].get('cv_std', 0)
-                        }
-                        
-                        results.append(model_info)
-                        
-                        # Check if this is the best model
-                        if (problem_type == 'classification' and score > best_score) or \
-                           (problem_type == 'regression' and score > best_score):
-                            best_score = score
-                            best_model_info = model_info
-                            best_model_info['full_result'] = model_result
-                
-                except Exception as e:
-                    logging.warning(f"Failed to train {model_type}: {str(e)}")
-                    continue
-            
-            if not results:
-                return {'success': False, 'error': 'No models could be trained successfully'}
-            
-            # Sort results by score
-            results.sort(key=lambda x: x['score'], reverse=True)
-            
-            return {
-                'success': True,
-                'best_model': best_model_info,
-                'all_results': results,
-                'problem_type': problem_type,
-                'feature_columns': feature_columns,
-                'target_column': target_column,
-                'summary': {
-                    'models_tried': len(results),
-                    'best_model_type': best_model_info['model_type'],
-                    'best_score': best_score
-                }
-            }
-            
-        except Exception as e:
-            logging.error(f"Error in auto ML: {str(e)}")
-            return {'success': False, 'error': str(e)}
+            return {'error': str(e)}

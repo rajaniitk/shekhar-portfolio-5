@@ -23,6 +23,14 @@ class VisualizationEngine:
         self.plotly_template = "plotly_dark"
         self.color_palette = px.colors.qualitative.Set3
         
+    def _safe_plot_execution(self, plot_func, *args, **kwargs):
+        """Safely execute plotting functions with error handling"""
+        try:
+            return plot_func(*args, **kwargs)
+        except Exception as e:
+            logging.error(f"Error in plot execution: {str(e)}")
+            return {'error': f'Plotting failed: {str(e)}'}
+        
     def create_correlation_heatmap(self, df):
         """Create correlation heatmap"""
         try:
@@ -30,12 +38,12 @@ class VisualizationEngine:
             if numeric_df.empty or numeric_df.shape[1] < 2:
                 return {'error': 'Insufficient numeric columns for correlation heatmap'}
             
-            corr_matrix = numeric_df.corr()
+            corr_matrix = numeric_df.corr().fillna(0)
             
             fig = go.Figure(data=go.Heatmap(
                 z=corr_matrix.values,
-                x=corr_matrix.columns,
-                y=corr_matrix.columns,
+                x=corr_matrix.columns.tolist(),
+                y=corr_matrix.columns.tolist(),
                 colorscale='RdBu',
                 zmid=0,
                 text=np.round(corr_matrix.values, 2),
@@ -51,7 +59,7 @@ class VisualizationEngine:
                 height=600
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating correlation heatmap: {str(e)}")
@@ -64,6 +72,9 @@ class VisualizationEngine:
                 return {'error': f'Column {column} not found'}
             
             col_data = df[column].dropna()
+            
+            if len(col_data) == 0:
+                return {'error': f'No data available for column {column}'}
             
             if df[column].dtype in ['int64', 'float64']:
                 # Numeric distribution
@@ -93,23 +104,27 @@ class VisualizationEngine:
                 )
                 
                 # Q-Q plot
-                qq_data = stats.probplot(col_data, dist="norm")
-                fig.add_trace(
-                    go.Scatter(x=qq_data[0][0], y=qq_data[0][1], 
-                             mode='markers', name='Q-Q Plot'),
-                    row=2, col=2
-                )
-                
-                # Add theoretical line for Q-Q plot
-                fig.add_trace(
-                    go.Scatter(x=qq_data[0][0], y=qq_data[1][1] + qq_data[1][0] * qq_data[0][0],
-                             mode='lines', name='Theoretical Line', line=dict(color='red')),
-                    row=2, col=2
-                )
+                if len(col_data) >= 3:
+                    qq_data = stats.probplot(col_data, dist="norm")
+                    fig.add_trace(
+                        go.Scatter(x=qq_data[0][0], y=qq_data[0][1], 
+                                 mode='markers', name='Q-Q Plot'),
+                        row=2, col=2
+                    )
+                    
+                    # Add theoretical line for Q-Q plot
+                    fig.add_trace(
+                        go.Scatter(x=qq_data[0][0], y=qq_data[1][1] + qq_data[1][0] * qq_data[0][0],
+                                 mode='lines', name='Theoretical Line', line=dict(color='red')),
+                        row=2, col=2
+                    )
                 
             else:
                 # Categorical distribution
                 value_counts = col_data.value_counts().head(20)
+                
+                if len(value_counts) == 0:
+                    return {'error': f'No valid values found in column {column}'}
                 
                 fig = make_subplots(
                     rows=1, cols=2,
@@ -119,14 +134,15 @@ class VisualizationEngine:
                 
                 # Bar chart
                 fig.add_trace(
-                    go.Bar(x=value_counts.index, y=value_counts.values, name='Count'),
+                    go.Bar(x=value_counts.index.astype(str), y=value_counts.values, name='Count'),
                     row=1, col=1
                 )
                 
                 # Pie chart (top 10 values)
+                top_values = value_counts.head(10)
                 fig.add_trace(
-                    go.Pie(labels=value_counts.head(10).index, 
-                          values=value_counts.head(10).values, name='Distribution'),
+                    go.Pie(labels=top_values.index.astype(str), 
+                          values=top_values.values, name='Distribution'),
                     row=1, col=2
                 )
             
@@ -137,7 +153,7 @@ class VisualizationEngine:
                 showlegend=False
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating distribution plot: {str(e)}")
@@ -150,6 +166,9 @@ class VisualizationEngine:
                 return {'error': f'Column {column} not found'}
             
             col_data = df[column].dropna()
+            
+            if len(col_data) == 0:
+                return {'error': f'No data available for column {column}'}
             
             if df[column].dtype not in ['int64', 'float64']:
                 return {'error': 'Box plot requires numeric data'}
@@ -172,9 +191,11 @@ class VisualizationEngine:
             lower_bound = q1 - 1.5 * iqr
             upper_bound = q3 + 1.5 * iqr
             
+            outlier_count = len(col_data[(col_data < lower_bound) | (col_data > upper_bound)])
+            
             fig.add_annotation(
                 x=0, y=col_data.max(),
-                text=f"IQR: {iqr:.2f}<br>Outliers: {len(col_data[(col_data < lower_bound) | (col_data > upper_bound)])}",
+                text=f"IQR: {iqr:.2f}<br>Outliers: {outlier_count}",
                 showarrow=True,
                 arrowhead=2
             )
@@ -185,7 +206,7 @@ class VisualizationEngine:
                 height=500
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating box plot: {str(e)}")
@@ -203,6 +224,9 @@ class VisualizationEngine:
             cols_subset = numeric_cols[:8]
             df_subset = df[cols_subset].dropna()
             
+            if len(df_subset) == 0:
+                return {'error': 'No data available after removing missing values'}
+            
             fig = ff.create_scatterplotmatrix(
                 df_subset,
                 diag='histogram',
@@ -215,7 +239,7 @@ class VisualizationEngine:
                 template=self.plotly_template
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating scatter matrix: {str(e)}")
@@ -251,10 +275,11 @@ class VisualizationEngine:
             plot_url = base64.b64encode(img.getvalue()).decode()
             plt.close()
             
-            return {'image': plot_url, 'type': 'image'}
+            return {'plot': plot_url, 'type': 'image'}
             
         except Exception as e:
             logging.error(f"Error creating pairplot: {str(e)}")
+            plt.close('all')  # Clean up any open plots
             return {'error': str(e)}
     
     def create_violin_plot(self, df, column):
@@ -264,6 +289,9 @@ class VisualizationEngine:
                 return {'error': f'Column {column} not found'}
             
             col_data = df[column].dropna()
+            
+            if len(col_data) == 0:
+                return {'error': f'No data available for column {column}'}
             
             if df[column].dtype not in ['int64', 'float64']:
                 return {'error': 'Violin plot requires numeric data'}
@@ -286,7 +314,7 @@ class VisualizationEngine:
                 height=500
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating violin plot: {str(e)}")
@@ -300,8 +328,14 @@ class VisualizationEngine:
             
             col_data = df[column].dropna()
             
+            if len(col_data) == 0:
+                return {'error': f'No data available for column {column}'}
+            
             if df[column].dtype not in ['int64', 'float64']:
                 return {'error': 'Q-Q plot requires numeric data'}
+            
+            if len(col_data) < 3:
+                return {'error': 'Insufficient data points for Q-Q plot'}
             
             qq_data = stats.probplot(col_data, dist="norm")
             
@@ -333,7 +367,7 @@ class VisualizationEngine:
                 height=500
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating Q-Q plot: {str(e)}")
@@ -347,10 +381,13 @@ class VisualizationEngine:
             
             value_counts = df[column].value_counts().head(20)
             
+            if len(value_counts) == 0:
+                return {'error': f'No data available for column {column}'}
+            
             fig = go.Figure()
             
             fig.add_trace(go.Bar(
-                x=value_counts.index,
+                x=value_counts.index.astype(str),
                 y=value_counts.values,
                 name=column,
                 marker_color=px.colors.qualitative.Set3
@@ -364,7 +401,7 @@ class VisualizationEngine:
                 height=500
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating bar chart: {str(e)}")
@@ -378,10 +415,13 @@ class VisualizationEngine:
             
             value_counts = df[column].value_counts().head(15)
             
+            if len(value_counts) == 0:
+                return {'error': f'No data available for column {column}'}
+            
             fig = go.Figure()
             
             fig.add_trace(go.Pie(
-                labels=value_counts.index,
+                labels=value_counts.index.astype(str),
                 values=value_counts.values,
                 name=column,
                 hole=0.3
@@ -393,7 +433,7 @@ class VisualizationEngine:
                 height=500
             )
             
-            return fig.to_json()
+            return {'plot': fig.to_json(), 'type': 'plotly'}
             
         except Exception as e:
             logging.error(f"Error creating pie chart: {str(e)}")
@@ -410,34 +450,35 @@ class VisualizationEngine:
             heatmaps = {}
             
             # Correlation heatmap
-            corr_matrix = numeric_df.corr()
+            corr_matrix = numeric_df.corr().fillna(0)
             heatmaps['correlation'] = go.Figure(data=go.Heatmap(
                 z=corr_matrix.values,
-                x=corr_matrix.columns,
-                y=corr_matrix.columns,
+                x=corr_matrix.columns.tolist(),
+                y=corr_matrix.columns.tolist(),
                 colorscale='RdBu',
                 zmid=0
             )).to_json()
             
             # Covariance heatmap
-            cov_matrix = numeric_df.cov()
+            cov_matrix = numeric_df.cov().fillna(0)
             heatmaps['covariance'] = go.Figure(data=go.Heatmap(
                 z=cov_matrix.values,
-                x=cov_matrix.columns,
-                y=cov_matrix.columns,
+                x=cov_matrix.columns.tolist(),
+                y=cov_matrix.columns.tolist(),
                 colorscale='Viridis'
             )).to_json()
             
             # Missing values heatmap
             missing_matrix = df.isnull().astype(int)
-            heatmaps['missing_values'] = go.Figure(data=go.Heatmap(
-                z=missing_matrix.values,
-                x=missing_matrix.columns,
-                y=list(range(len(missing_matrix))),
-                colorscale=[[0, 'blue'], [1, 'red']]
-            )).to_json()
+            if missing_matrix.sum().sum() > 0:  # Only create if there are missing values
+                heatmaps['missing_values'] = go.Figure(data=go.Heatmap(
+                    z=missing_matrix.values,
+                    x=missing_matrix.columns.tolist(),
+                    y=list(range(len(missing_matrix))),
+                    colorscale=[[0, 'blue'], [1, 'red']]
+                )).to_json()
             
-            return heatmaps
+            return {'plots': heatmaps, 'type': 'plotly_collection'}
             
         except Exception as e:
             logging.error(f"Error creating heatmaps: {str(e)}")
@@ -455,6 +496,9 @@ class VisualizationEngine:
                 return {'error': 'At least 3 numeric columns required'}
             
             df_clean = df[numeric_cols[:3]].dropna()
+            
+            if len(df_clean) == 0:
+                return {'error': 'No data available after removing missing values'}
             
             plots_3d = {}
             
@@ -486,39 +530,38 @@ class VisualizationEngine:
             
             # 3D Surface plot (if enough data)
             if len(df_clean) > 100:
-                # Create grid for surface plot
-                x_vals = np.linspace(df_clean.iloc[:, 0].min(), df_clean.iloc[:, 0].max(), 20)
-                y_vals = np.linspace(df_clean.iloc[:, 1].min(), df_clean.iloc[:, 1].max(), 20)
-                
-                X, Y = np.meshgrid(x_vals, y_vals)
-                
-                # Simple interpolation for Z values
-                Z = np.zeros_like(X)
-                for i in range(len(x_vals)):
-                    for j in range(len(y_vals)):
-                        # Find nearest point
-                        distances = np.sqrt((df_clean.iloc[:, 0] - X[j, i])**2 + (df_clean.iloc[:, 1] - Y[j, i])**2)
-                        nearest_idx = distances.idxmin()
-                        Z[j, i] = df_clean.iloc[nearest_idx, 2]
-                
-                fig_surface = go.Figure(data=go.Surface(
-                    x=X, y=Y, z=Z,
-                    colorscale='Viridis'
-                ))
-                
-                fig_surface.update_layout(
-                    title='3D Surface Plot',
-                    scene=dict(
-                        xaxis_title=numeric_cols[0],
-                        yaxis_title=numeric_cols[1],
-                        zaxis_title=numeric_cols[2]
-                    ),
-                    template=self.plotly_template
-                )
-                
-                plots_3d['surface'] = fig_surface.to_json()
+                try:
+                    # Create grid for surface plot
+                    x_vals = np.linspace(df_clean.iloc[:, 0].min(), df_clean.iloc[:, 0].max(), 20)
+                    y_vals = np.linspace(df_clean.iloc[:, 1].min(), df_clean.iloc[:, 1].max(), 20)
+                    
+                    X, Y = np.meshgrid(x_vals, y_vals)
+                    
+                    # Simple interpolation for Z values
+                    Z = np.zeros_like(X)
+                    for i in range(len(x_vals)):
+                        for j in range(len(y_vals)):
+                            # Find nearest point
+                            distances = np.sqrt((df_clean.iloc[:, 0] - X[j, i])**2 + (df_clean.iloc[:, 1] - Y[j, i])**2)
+                            nearest_idx = distances.idxmin()
+                            Z[j, i] = df_clean.iloc[nearest_idx, 2]
+                    
+                    fig_surface = go.Figure(data=[go.Surface(z=Z, x=X, y=Y)])
+                    fig_surface.update_layout(
+                        title='3D Surface Plot',
+                        scene=dict(
+                            xaxis_title=numeric_cols[0],
+                            yaxis_title=numeric_cols[1],
+                            zaxis_title=numeric_cols[2]
+                        ),
+                        template=self.plotly_template
+                    )
+                    
+                    plots_3d['surface'] = fig_surface.to_json()
+                except Exception as e:
+                    logging.warning(f"Could not create 3D surface plot: {str(e)}")
             
-            return plots_3d
+            return {'plots': plots_3d, 'type': 'plotly_collection'}
             
         except Exception as e:
             logging.error(f"Error creating 3D plots: {str(e)}")
